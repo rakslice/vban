@@ -15,6 +15,7 @@
  *  You should have received a copy of the GNU General Public License
  *  along with vban_emitter.  If not, see <http://www.gnu.org/licenses/>.
  */
+#define _POSIX_C_SOURCE 199309L
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +28,7 @@
 #include "common/logger.h"
 #include "common/packet.h"
 #include "common/backend/audio_backend.h"
+#include <time.h>
 
 struct config_t
 {
@@ -180,12 +182,16 @@ int get_options(struct config_t* config, int argc, char* const* argv)
 
 int main(int argc, char* const* argv)
 {
+    struct timespec interval;
     int ret = 0;
     int size = 0;
     struct config_t config;
     struct stream_config_t stream_config;
     struct main_t   main_s;
     int max_size = 0;
+
+    interval.tv_sec = 0;
+    interval.tv_nsec = 5500000;
 
     printf("%s version %s\n\n", argv[0], VBAN_VERSION);
 
@@ -249,6 +255,7 @@ int main(int argc, char* const* argv)
             MainRun = 0;
             break;
         }
+	nanosleep(&interval, NULL);
     }
 
     audio_release(&main_s.audio);
