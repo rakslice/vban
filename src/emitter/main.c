@@ -29,6 +29,7 @@
 #include "common/packet.h"
 #include "common/backend/audio_backend.h"
 #include <time.h>
+#include <sys/time.h>
 
 struct config_t
 {
@@ -182,16 +183,29 @@ int get_options(struct config_t* config, int argc, char* const* argv)
 
 int main(int argc, char* const* argv)
 {
-    struct timespec interval;
+    struct timespec sleep_interval;
+    struct timeval prev_time, cur_time;
+    time_t prev_output_sec;
     int ret = 0;
     int size = 0;
     struct config_t config;
     struct stream_config_t stream_config;
     struct main_t   main_s;
     int max_size = 0;
+    int max_packets_in_flight = 1;
+    int packets_in_flight = 0;
+    int packets_sent = 0;
+    time_t packet_expiry_time; // microseconds
+    time_t carried_time = 0;
+    time_t average_carried = 0;
+    int average_sleeps = 0;
+    int sleeps = 0;
 
-    interval.tv_sec = 0;
-    interval.tv_nsec = 5500000;
+    gettimeofday(&prev_time, NULL);
+    prev_output_sec = prev_time.tv_sec;
+
+    sleep_interval.tv_sec = 0;
+    sleep_interval.tv_nsec = 200000;
 
     printf("%s version %s\n\n", argv[0], VBAN_VERSION);
 
@@ -232,8 +246,71 @@ int main(int argc, char* const* argv)
     packet_init_header(main_s.buffer, &stream_config, config.stream_name);
     max_size = packet_get_max_payload_size(main_s.buffer);
 
+    int bits_per_sample;
+    switch (config.stream.bit_fmt) { 
+	case VBAN_BITFMT_12_INT:
+		bits_per_sample = 12;
+		break;
+	case VBAN_BITFMT_10_INT:
+		bits_per_sample = 10;
+		break;
+	default:
+		bits_per_sample = VBanBitResolutionSize[config.stream.bit_fmt] * 8;
+		break;
+
+    }
+    int bytes_per_sec = config.stream.nb_channels * 
+			config.stream.sample_rate *
+			bits_per_sample / 8;
+
+    packet_expiry_time = 1000000 * max_size / bytes_per_sec; // microseconds
+    printf("packet expiry time %lld usec\n", packet_expiry_time);
+
+    printf("max packet size %d\n", max_size);
+
     while (MainRun)
     {
+	while (packets_in_flight >= max_packets_in_flight) {
+		nanosleep(&sleep_interval, NULL);
+		sleeps += 100;
+    		gettimeofday(&cur_time, NULL);
+		time_t elapsed = cur_time.tv_usec - prev_time.tv_usec;
+		 
+        	if (cur_time.tv_sec != prev_time.tv_sec) { 
+			if (cur_time.tv_sec < prev_time.tv_sec) {
+				// for packet timing purposes just assume 1 sec
+				elapsed += 1000000;
+			} else {
+				elapsed += 1000000 * (cur_time.tv_sec - prev_time.tv_sec);
+			}
+		}
+		if (cur_time.tv_sec != prev_output_sec) {
+
+			printf("packets/sec: %d, carried: %lld usec, sleeps: %d.%02d\n", packets_sent, average_carried, average_sleeps/100, average_sleeps%100);
+			packets_sent = 0;
+			prev_output_sec = cur_time.tv_sec;
+		}
+
+		elapsed += carried_time;
+
+		if (elapsed >= packet_expiry_time) {
+
+			int packets_retired = elapsed / packet_expiry_time;
+			carried_time = elapsed % packet_expiry_time;
+
+			average_carried = (average_carried * 15 + carried_time) / 16;
+			if (packets_retired > 0) {
+				if (packets_retired > packets_in_flight)
+					packets_in_flight = 0;
+				else
+					packets_in_flight -= packets_retired;
+			}
+			prev_time = cur_time;
+
+		}
+	};
+	average_sleeps = (average_sleeps * 15 + sleeps) / 16 ;
+	sleeps = 0;
         size = audio_read(main_s.audio, PACKET_PAYLOAD_PTR(main_s.buffer), max_size);
         if (size < 0)
         {
@@ -255,7 +332,8 @@ int main(int argc, char* const* argv)
             MainRun = 0;
             break;
         }
-	nanosleep(&interval, NULL);
+	packets_sent += 1;
+	packets_in_flight += 1;
     }
 
     audio_release(&main_s.audio);
