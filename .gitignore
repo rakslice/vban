@@ -15,6 +15,7 @@ missing
 tags
 vban_emitter
 vban_receptor
+/src/vban_sendtext
 *~
 NOTES
 
@@ -23,3 +24,7 @@ build*
 _install
 .vscode
 CMakeLists.txt.user*
+
+
+/config.guess
+/config.sub
