@@ -206,8 +206,6 @@ void timeval_add_usec(struct timeval * value, time_t usec) {
     value->tv_usec = usec % 1000000;
 }
 
-
-
 time_t sleep_until(struct timeval until_time) {
     struct timeval cur_time;
     struct timespec sleep_interval;
@@ -248,6 +246,10 @@ int main(int argc, char* const* argv)
     time_t average_drift = 0;
     int time_init = 0;
     int check_sleep_time_error = 0;
+
+    int bits_per_sample;
+    int bytes_per_sec;
+    time_t drift;
 
     gettimeofday(&next_packet_time, NULL);
     prev_output_sec = next_packet_time.tv_sec;
@@ -291,7 +293,6 @@ int main(int argc, char* const* argv)
     packet_init_header(main_s.buffer, &stream_config, config.stream_name);
     max_size = packet_get_max_payload_size(main_s.buffer);
 
-    int bits_per_sample;
     switch (config.stream.bit_fmt) { 
         case VBAN_BITFMT_12_INT:
             bits_per_sample = 12;
@@ -304,7 +305,7 @@ int main(int argc, char* const* argv)
             break;
     }
 
-    int bytes_per_sec = config.stream.nb_channels * 
+    bytes_per_sec = config.stream.nb_channels *
                         config.stream.sample_rate *
                         bits_per_sample / 8;
 
@@ -396,7 +397,7 @@ int main(int argc, char* const* argv)
                 }
             }
 
-            time_t drift = actual_time.tv_usec;
+            drift = actual_time.tv_usec;
 
             average_drift += drift;
 
