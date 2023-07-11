@@ -325,11 +325,12 @@ int main(int argc, char* const* argv)
             if (check_sleep_time_error) {
                 average_drift /= packets_sent;
                 printf(", avg sleep time err: %ld usec", average_drift);
+                average_drift = 0;
             }
+
             printf("\n");
 
             packets_sent = 0;
-            average_drift = 0;
             average_sleep = 0;
 
             prev_output_sec = next_packet_time.tv_sec;
@@ -394,10 +395,9 @@ int main(int argc, char* const* argv)
                     printf("packet %d drift ", packets_sent); print_timeval(&actual_time);
                 }
             }
+
             time_t drift = actual_time.tv_usec;
-            if (packets_sent == 1) {
-                average_drift = drift;
-            }
+
             average_drift += drift;
 
         }
