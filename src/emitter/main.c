@@ -53,6 +53,8 @@ void signalHandler(int signum)
     MainRun = 0;
 }
 
+int show_timing_info = 1;
+
 void usage()
 {
     printf("\nUsage: vban_emitter [OPTIONS]...\n\n");
@@ -180,11 +182,58 @@ int get_options(struct config_t* config, int argc, char* const* argv)
     return 0;
 }
 
+void print_timeval(struct timeval * time) {
+    if (time->tv_sec < 0)
+        printf("-%ld.%06ld\n", -time->tv_sec-1, 1000000-time->tv_usec);
+    else
+        printf("%ld.%06ld\n", time->tv_sec, time->tv_usec);
+}
+
+void timeval_sub(struct timeval * value, struct timeval * less) {
+    if (value->tv_usec >= less->tv_usec) {
+        value->tv_sec -= less->tv_sec;
+        value->tv_usec -= less->tv_usec;
+    } else {
+        // carry
+        value->tv_sec -= less->tv_sec + 1;
+        value->tv_usec += 1000000 - less->tv_usec;
+    }
+}
+
+void timeval_add_usec(struct timeval * value, time_t usec) {
+    usec += value->tv_usec;
+    value->tv_sec += usec / 1000000;
+    value->tv_usec = usec % 1000000;
+}
+
+
+
+time_t sleep_until(struct timeval until_time) {
+    struct timeval cur_time;
+    struct timespec sleep_interval;
+    
+    gettimeofday(&cur_time, NULL);
+    timeval_sub(&until_time, &cur_time);
+    if (until_time.tv_sec != 0) {
+        // assume underflow, or timing has gone really wrong -> don't sleep
+        if (until_time.tv_sec < -1) {
+            if (show_timing_info) {
+                printf("underflow sleep "); print_timeval(&until_time);
+            }
+        }
+        return until_time.tv_sec * 1000000 + until_time.tv_usec;
+    }
+
+    sleep_interval.tv_sec = 0;
+    sleep_interval.tv_nsec = (until_time.tv_usec) * 1000;
+
+    nanosleep(&sleep_interval, NULL);
+    return until_time.tv_usec;
+}
 
 int main(int argc, char* const* argv)
 {
-    struct timespec sleep_interval;
-    struct timeval prev_time, cur_time;
+    struct timeval next_packet_time;
     time_t prev_output_sec;
     int ret = 0;
     int size = 0;
@@ -192,20 +241,16 @@ int main(int argc, char* const* argv)
     struct stream_config_t stream_config;
     struct main_t   main_s;
     int max_size = 0;
-    int max_packets_in_flight = 1;
-    int packets_in_flight = 0;
     int packets_sent = 0;
-    time_t packet_expiry_time; // microseconds
-    time_t carried_time = 0;
-    time_t average_carried = 0;
-    int average_sleeps = 0;
-    int sleeps = 0;
+    time_t packet_interval; // microseconds
+    time_t sleep_time = 0;
+    time_t average_sleep = 0;
+    time_t average_drift = 0;
+    int time_init = 0;
+    int check_sleep_time_error = 0;
 
-    gettimeofday(&prev_time, NULL);
-    prev_output_sec = prev_time.tv_sec;
-
-    sleep_interval.tv_sec = 0;
-    sleep_interval.tv_nsec = 200000;
+    gettimeofday(&next_packet_time, NULL);
+    prev_output_sec = next_packet_time.tv_sec;
 
     printf("%s version %s\n\n", argv[0], VBAN_VERSION);
 
@@ -248,69 +293,48 @@ int main(int argc, char* const* argv)
 
     int bits_per_sample;
     switch (config.stream.bit_fmt) { 
-	case VBAN_BITFMT_12_INT:
-		bits_per_sample = 12;
-		break;
-	case VBAN_BITFMT_10_INT:
-		bits_per_sample = 10;
-		break;
-	default:
-		bits_per_sample = VBanBitResolutionSize[config.stream.bit_fmt] * 8;
-		break;
-
+        case VBAN_BITFMT_12_INT:
+            bits_per_sample = 12;
+            break;
+        case VBAN_BITFMT_10_INT:
+            bits_per_sample = 10;
+            break;
+        default:
+            bits_per_sample = VBanBitResolutionSize[config.stream.bit_fmt] * 8;
+            break;
     }
+
     int bytes_per_sec = config.stream.nb_channels * 
-			config.stream.sample_rate *
-			bits_per_sample / 8;
+                        config.stream.sample_rate *
+                        bits_per_sample / 8;
 
-    packet_expiry_time = 1000000 * max_size / bytes_per_sec; // microseconds
-    printf("packet expiry time %lld usec\n", packet_expiry_time);
+    packet_interval = 1000000 * max_size / bytes_per_sec; // microseconds
+    if (show_timing_info) {
+        printf("packet interval %ld usec\n", packet_interval);
 
-    printf("max packet size %d\n", max_size);
+        printf("max packet size %d\n", max_size);
+    }
 
     while (MainRun)
     {
-	while (packets_in_flight >= max_packets_in_flight) {
-		nanosleep(&sleep_interval, NULL);
-		sleeps += 100;
-    		gettimeofday(&cur_time, NULL);
-		time_t elapsed = cur_time.tv_usec - prev_time.tv_usec;
-		 
-        	if (cur_time.tv_sec != prev_time.tv_sec) { 
-			if (cur_time.tv_sec < prev_time.tv_sec) {
-				// for packet timing purposes just assume 1 sec
-				elapsed += 1000000;
-			} else {
-				elapsed += 1000000 * (cur_time.tv_sec - prev_time.tv_sec);
-			}
-		}
-		if (cur_time.tv_sec != prev_output_sec) {
+        if (show_timing_info && (next_packet_time.tv_sec != prev_output_sec)) {
 
-			printf("packets/sec: %d, carried: %lld usec, sleeps: %d.%02d\n", packets_sent, average_carried, average_sleeps/100, average_sleeps%100);
-			packets_sent = 0;
-			prev_output_sec = cur_time.tv_sec;
-		}
+            average_sleep /= packets_sent;
 
-		elapsed += carried_time;
+            printf("packets/sec: %d, avg sleep: %ld usec", packets_sent, average_sleep);
+            if (check_sleep_time_error) {
+                average_drift /= packets_sent;
+                printf(", avg sleep time err: %ld usec", average_drift);
+            }
+            printf("\n");
 
-		if (elapsed >= packet_expiry_time) {
+            packets_sent = 0;
+            average_drift = 0;
+            average_sleep = 0;
 
-			int packets_retired = elapsed / packet_expiry_time;
-			carried_time = elapsed % packet_expiry_time;
+            prev_output_sec = next_packet_time.tv_sec;
+        }
 
-			average_carried = (average_carried * 15 + carried_time) / 16;
-			if (packets_retired > 0) {
-				if (packets_retired > packets_in_flight)
-					packets_in_flight = 0;
-				else
-					packets_in_flight -= packets_retired;
-			}
-			prev_time = cur_time;
-
-		}
-	};
-	average_sleeps = (average_sleeps * 15 + sleeps) / 16 ;
-	sleeps = 0;
         size = audio_read(main_s.audio, PACKET_PAYLOAD_PTR(main_s.buffer), max_size);
         if (size < 0)
         {
@@ -332,9 +356,54 @@ int main(int argc, char* const* argv)
             MainRun = 0;
             break;
         }
-	packets_sent += 1;
-	packets_in_flight += 1;
-    }
+        packets_sent += 1;
+
+        if (!time_init) {
+            gettimeofday(&next_packet_time, NULL);
+            time_init = 1;
+        }
+        timeval_add_usec(&next_packet_time, packet_interval);
+        sleep_time = sleep_until(next_packet_time);
+
+        if (sleep_time < 0) {
+            // if we're late because the source is behind,
+            // actually just slip the schedule
+
+            if (show_timing_info) {
+                if (sleep_time < -10000) { 
+                    printf("big slip %ld\n", sleep_time);
+                }
+            }
+            gettimeofday(&next_packet_time, NULL);
+        }
+
+        // collect sleep time error stats
+        if (check_sleep_time_error) {
+
+            struct timeval actual_time;
+            gettimeofday(&actual_time, NULL);
+            //+ve -> packet is late
+
+            timeval_sub(&actual_time, &next_packet_time);
+            if ((actual_time.tv_sec > 0) || 
+                (actual_time.tv_sec == 0 && actual_time.tv_usec > 1000) ||
+                (actual_time.tv_usec == -1 && actual_time.tv_usec < 999000) ||
+                (actual_time.tv_usec < -1)) {
+
+                if (show_timing_info) {
+                    printf("packet %d drift ", packets_sent); print_timeval(&actual_time);
+                }
+            }
+            time_t drift = actual_time.tv_usec;
+            if (packets_sent == 1) {
+                average_drift = drift;
+            }
+            average_drift += drift;
+
+        }
+
+        average_sleep += sleep_time;
+    }    
 
     audio_release(&main_s.audio);
     socket_release(&main_s.socket);
