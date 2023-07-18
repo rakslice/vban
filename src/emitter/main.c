@@ -69,6 +69,7 @@ void usage()
     printf("-f, --format=VALUE      : Audio device sample format (see below). default is 16I (16bits integer)\n");
     printf("-c, --channels=LIST     : channels from the audio device to use. LIST is of form x,y,z,... default is to forward the stream as it is\n");
     printf("-N, --no-timing         : disable timing and send as data arrives from the backend\n");
+    
     printf("-l, --loglevel=LEVEL    : Log level, from 0 (FATAL) to 4 (DEBUG). default is 1 (ERROR)\n");
     printf("-h, --help              : display this message\n\n");
     printf("%s\n\n", stream_bit_fmt_help());
