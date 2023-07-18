@@ -37,6 +37,7 @@ struct config_t
     struct audio_config_t       audio;
     struct stream_config_t      stream;
     struct audio_map_config_t   map;
+    int                         use_timing;
     char                        stream_name[VBAN_STREAM_NAME_SIZE];
 };
 
@@ -67,7 +68,7 @@ void usage()
     printf("-n, --nbchannels=VALUE  : Audio device number of channels. default 2\n");
     printf("-f, --format=VALUE      : Audio device sample format (see below). default is 16I (16bits integer)\n");
     printf("-c, --channels=LIST     : channels from the audio device to use. LIST is of form x,y,z,... default is to forward the stream as it is\n");
-
+    printf("-N, --no-timing         : disable timing and send as data arrives from the backend\n");
     printf("-l, --loglevel=LEVEL    : Log level, from 0 (FATAL) to 4 (DEBUG). default is 1 (ERROR)\n");
     printf("-h, --help              : display this message\n\n");
     printf("%s\n\n", stream_bit_fmt_help());
@@ -89,6 +90,7 @@ int get_options(struct config_t* config, int argc, char* const* argv)
         {"nbchannels",  required_argument,  0, 'n'},
         {"format",      required_argument,  0, 'f'},
         {"channels",    required_argument,  0, 'c'},
+        {"no-timing",   no_argument,        0, 'N'},
         {"loglevel",    required_argument,  0, 'l'},
         {"help",        no_argument,        0, 'h'},
         {0,             0,                  0,  0 }
@@ -102,10 +104,12 @@ int get_options(struct config_t* config, int argc, char* const* argv)
 
     config->socket.direction    = SOCKET_OUT;
 
+    config->use_timing          = 1;
+
     /* yes, I assume config is not 0 */
     while (1)
     {
-        c = getopt_long(argc, argv, "i:p:s:b:d:r:n:f:c:l:h", options, 0);
+        c = getopt_long(argc, argv, "i:p:s:b:d:r:n:f:c:Nl:h", options, 0);
         if (c == -1)
             break;
 
@@ -147,6 +151,10 @@ int get_options(struct config_t* config, int argc, char* const* argv)
                 ret = audio_parse_map_config(&config->map, optarg);
                 break;
 
+            case 'N':
+                config->use_timing = 0;
+                break;
+
             case 'l':
                 logger_set_output_level(atoi(optarg));
                 break;
@@ -182,40 +190,54 @@ int get_options(struct config_t* config, int argc, char* const* argv)
     return 0;
 }
 
-void print_timeval(struct timeval * time) {
+void print_timeval(struct timeval * time)
+{
     if (time->tv_sec < 0)
+    {
         printf("-%ld.%06ld\n", -time->tv_sec-1, 1000000-time->tv_usec);
+    }
     else
+    {
         printf("%ld.%06ld\n", time->tv_sec, time->tv_usec);
+    }
 }
 
-void timeval_sub(struct timeval * value, struct timeval * less) {
-    if (value->tv_usec >= less->tv_usec) {
+void timeval_sub(struct timeval * value, struct timeval * less)
+{
+    if (value->tv_usec >= less->tv_usec)
+    {
         value->tv_sec -= less->tv_sec;
         value->tv_usec -= less->tv_usec;
-    } else {
+    }
+    else
+    {
         // carry
         value->tv_sec -= less->tv_sec + 1;
         value->tv_usec += 1000000 - less->tv_usec;
     }
 }
 
-void timeval_add_usec(struct timeval * value, time_t usec) {
+void timeval_add_usec(struct timeval * value, time_t usec)
+{
     usec += value->tv_usec;
     value->tv_sec += usec / 1000000;
     value->tv_usec = usec % 1000000;
 }
 
-time_t sleep_until(struct timeval until_time) {
+time_t sleep_until(struct timeval until_time)
+{
     struct timeval cur_time;
     struct timespec sleep_interval;
     
     gettimeofday(&cur_time, NULL);
     timeval_sub(&until_time, &cur_time);
-    if (until_time.tv_sec != 0) {
+    if (until_time.tv_sec != 0)
+    {
         // assume underflow, or timing has gone really wrong -> don't sleep
-        if (until_time.tv_sec < -1) {
-            if (show_timing_info) {
+        if (until_time.tv_sec < -1)
+        {
+            if (show_timing_info != 0)
+            {
                 printf("underflow sleep "); print_timeval(&until_time);
             }
         }
@@ -247,6 +269,7 @@ int main(int argc, char* const* argv)
     int time_init = 0;
     int check_sleep_time_error = 0;
 
+    int use_timing;
     int bits_per_sample;
     int bytes_per_sec;
     time_t drift;
@@ -305,25 +328,33 @@ int main(int argc, char* const* argv)
             break;
     }
 
-    bytes_per_sec = config.stream.nb_channels *
-                        config.stream.sample_rate *
-                        bits_per_sample / 8;
+    use_timing = config.use_timing;
 
-    packet_interval = 1000000 * max_size / bytes_per_sec; // microseconds
-    if (show_timing_info) {
-        printf("packet interval %ld usec\n", packet_interval);
+    if (use_timing != 0)
+    {
+        bytes_per_sec = config.stream.nb_channels *
+                            config.stream.sample_rate *
+                            bits_per_sample / 8;
 
-        printf("max packet size %d\n", max_size);
+        packet_interval = 1000000 * max_size / bytes_per_sec; // microseconds
+
+        if (show_timing_info != 0)
+        {
+            printf("packet interval %ld usec\n", packet_interval);
+
+            printf("max packet size %d\n", max_size);
+        }
     }
 
     while (MainRun)
     {
-        if (show_timing_info && (next_packet_time.tv_sec != prev_output_sec)) {
-
+        if ((use_timing != 0) && (show_timing_info != 0) && (next_packet_time.tv_sec != prev_output_sec))
+        {
             average_sleep /= packets_sent;
 
             printf("packets/sec: %d, avg sleep: %ld usec", packets_sent, average_sleep);
-            if (check_sleep_time_error) {
+            if (check_sleep_time_error != 0)
+            {
                 average_drift /= packets_sent;
                 printf(", avg sleep time err: %ld usec", average_drift);
                 average_drift = 0;
@@ -360,50 +391,58 @@ int main(int argc, char* const* argv)
         }
         packets_sent += 1;
 
-        if (!time_init) {
-            gettimeofday(&next_packet_time, NULL);
-            time_init = 1;
-        }
-        timeval_add_usec(&next_packet_time, packet_interval);
-        sleep_time = sleep_until(next_packet_time);
-
-        if (sleep_time < 0) {
-            // if we're late because the source is behind,
-            // actually just slip the schedule
-
-            if (show_timing_info) {
-                if (sleep_time < -10000) { 
-                    printf("big slip %ld\n", sleep_time);
-                }
-            }
-            gettimeofday(&next_packet_time, NULL);
-        }
-
-        // collect sleep time error stats
-        if (check_sleep_time_error) {
-
-            struct timeval actual_time;
-            gettimeofday(&actual_time, NULL);
-            //+ve -> packet is late
-
-            timeval_sub(&actual_time, &next_packet_time);
-            if ((actual_time.tv_sec > 0) || 
-                (actual_time.tv_sec == 0 && actual_time.tv_usec > 1000) ||
-                (actual_time.tv_usec == -1 && actual_time.tv_usec < 999000) ||
-                (actual_time.tv_usec < -1)) {
-
-                if (show_timing_info) {
-                    printf("packet %d drift ", packets_sent); print_timeval(&actual_time);
-                }
+        if (use_timing != 0)
+        {
+            if (time_init == 0)
+            {
+                gettimeofday(&next_packet_time, NULL);
+                time_init = 1;
             }
 
-            drift = actual_time.tv_usec;
+            timeval_add_usec(&next_packet_time, packet_interval);
+            sleep_time = sleep_until(next_packet_time);
 
-            average_drift += drift;
+            if (sleep_time < 0)
+            {
+                // if we're late because the source is behind,
+                // actually just slip the schedule
 
+                if (show_timing_info != 0)
+                {
+                    if (sleep_time < -10000)
+                    { 
+                        printf("big slip %ld\n", sleep_time);
+                    }
+                }
+                gettimeofday(&next_packet_time, NULL);
+            }
+
+            // collect sleep time error stats
+            if (check_sleep_time_error != 0)
+            {
+
+                struct timeval actual_time;
+                gettimeofday(&actual_time, NULL);
+                //+ve -> packet is late
+
+                timeval_sub(&actual_time, &next_packet_time);
+                if ((actual_time.tv_sec > 0) || 
+                    (actual_time.tv_sec == 0 && actual_time.tv_usec > 1000) ||
+                    (actual_time.tv_usec == -1 && actual_time.tv_usec < 999000) ||
+                    (actual_time.tv_usec < -1))
+                {
+                    if (show_timing_info != 0)
+                    {
+                        printf("packet %d drift ", packets_sent); print_timeval(&actual_time);
+                    }
+                }
+
+                drift = actual_time.tv_usec;
+                average_drift += drift;
+            }
+
+            average_sleep += sleep_time;            
         }
-
-        average_sleep += sleep_time;
     }    
 
     audio_release(&main_s.audio);
